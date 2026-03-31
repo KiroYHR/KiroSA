@@ -3,7 +3,10 @@ const router = express.Router();
 const ticketController = require('../controllers/ticketController');
 const authMiddleware = require('../middlewares/authMiddleware');
 
-router.get('/monthly', authMiddleware, ticketController.getMyTicket);
-router.post('/monthly/subscribe', authMiddleware, ticketController.subscribeTicket);
+// 1. API: Kiểm tra xem tôi có vé tháng chưa? (Mobile gọi GET /api/tickets/my-ticket)
+router.get('/my-ticket', authMiddleware, ticketController.getMyTicket);
+
+// 2. API: Thanh toán mua vé tháng (Mobile gọi POST /api/tickets/monthly-ticket)
+router.post('/monthly-ticket', authMiddleware, ticketController.subscribeTicket);
 
 module.exports = router;

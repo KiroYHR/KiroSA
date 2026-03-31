@@ -17,7 +17,13 @@ exports.getProfile = async (req, res) => {
 
     res.status(200).json({
       message: 'Lấy thông tin thành công',
-      data: user
+      data: {
+        id: user.user_id,
+        name: user.full_name,
+        phone: user.phone_number,
+        role: user.role,
+        balance: user.wallet_balance
+      }
     });
   } catch (error) {
     console.error(error);
@@ -78,14 +84,14 @@ exports.getAllUsers = async (req, res) => {
 // Khách hàng tự cập nhật thông tin cá nhân (PUT)
 exports.updateProfile = async (req, res) => {
   try {
-    const user_id = req.user.userId; // Lấy ID từ Token (chỉ sửa được của chính mình)
-    const { full_name, phone_number } = req.body;
+    const user_id = req.user.userId;
+    const { name, phone } = req.body; // Hứng 'name' từ Mobile
 
     const [updatedUser] = await db('Users')
       .where({ user_id: user_id })
       .update({
-        full_name: full_name,
-        phone_number: phone_number
+        full_name: name || db.raw('full_name'), // Map 'name' vào 'full_name'
+        phone_number: phone || db.raw('phone_number')
       })
       .returning(['user_id', 'full_name', 'phone_number']);
 
@@ -118,5 +124,92 @@ exports.changePassword = async (req, res) => {
     res.status(200).json({ message: 'Đổi mật khẩu thành công!' });
   } catch (error) {
     res.status(500).json({ message: 'Lỗi đổi mật khẩu', error });
+  }
+};
+
+// API Lấy lịch sử đỗ xe của User
+exports.getHistory = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    
+    // 1. Tìm tất cả các biển số xe mà ông này đang sở hữu
+    const userVehicles = await db('Vehicles').where({ user_id: userId }).pluck('license_plate');
+    
+    if (userVehicles.length === 0) {
+      return res.status(200).json({ message: 'Lấy lịch sử thành công', data: [] });
+    }
+
+    // 2. Lấy lịch sử các chuyến xe khớp với các biển số trên
+    const history = await db('Parking_Sessions')
+      .whereIn('license_plate', userVehicles)
+      .orderBy('check_in_time', 'desc');
+
+    res.status(200).json({
+      message: 'Lấy lịch sử thành công',
+      data: history
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: 'Lỗi server khi lấy lịch sử.' });
+  }
+};
+
+// Lấy lịch sử giao dịch ví tiền của User
+exports.getTransactions = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    
+    // Lấy toàn bộ giao dịch của user này, sắp xếp mới nhất lên đầu
+    const transactions = await db('Transactions')
+      .where({ user_id: userId })
+      .orderBy('created_at', 'desc');
+
+    res.status(200).json({
+      message: 'Lấy lịch sử giao dịch thành công',
+      data: transactions
+    });
+  } catch (error) {
+    console.error("Lỗi lấy lịch sử giao dịch:", error);
+    res.status(500).json({ message: 'Lỗi server khi lấy lịch sử giao dịch.' });
+  }
+};
+
+// ĐỔI MẬT KHẨU NGƯỜI DÙNG
+exports.changePassword = async (req, res) => {
+  // Lấy ID từ Token (do khách đã đăng nhập)
+  const user_id = req.user.userId; 
+  // Bắt Mobile phải gửi lên mật khẩu cũ và mới
+  const { old_password, new_password } = req.body;
+
+  if (!old_password || !new_password) {
+    return res.status(400).json({ message: 'Vui lòng nhập mật khẩu cũ và mật khẩu mới!' });
+  }
+
+  try {
+    // 1. Tìm thông tin khách hàng trong Database
+    const user = await db('Users').where({ user_id }).first();
+    
+    if (!user) {
+      return res.status(404).json({ message: 'Không tìm thấy người dùng!' });
+    }
+
+    // 2. Kiểm tra xem mật khẩu cũ có gõ đúng không
+    // (Lưu ý: Đang dùng so sánh thô khớp với authController của bạn lúc Demo)
+    if (old_password !== user.password_hash) {
+      return res.status(400).json({ message: 'Mật khẩu cũ không chính xác!' });
+    }
+
+    // 3. Tiến hành cập nhật mật khẩu mới vào Database
+    await db('Users')
+      .where({ user_id })
+      .update({ 
+        password_hash: new_password 
+      });
+
+    res.status(200).json({ message: 'Cập nhật mật khẩu thành công!' });
+    
+  } catch (error) {
+    console.error("Lỗi khi đổi mật khẩu:", error);
+    res.status(500).json({ message: 'Lỗi server khi đổi mật khẩu.' });
   }
 };

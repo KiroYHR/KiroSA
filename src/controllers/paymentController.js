@@ -1,11 +1,14 @@
 const db = require('../db'); // File kết nối Database của bạn
 
 // 1. API NẠP TIỀN VÀO VÍ
+// 1. API NẠP TIỀN VÀO VÍ
 exports.topUp = async (req, res) => {
-  const { user_id, amount } = req.body;
+  // 👇 ĐÃ SỬA: Lấy ID từ Token bảo mật, không lấy từ body
+  const user_id = req.user.userId; 
+  const { amount } = req.body;
 
-  if (!user_id || !amount || amount <= 0) {
-    return res.status(400).json({ message: 'Số tiền hoặc thông tin không hợp lệ!' });
+  if (!amount || amount <= 0) {
+    return res.status(400).json({ message: 'Số tiền không hợp lệ!' });
   }
 
   try {
@@ -22,8 +25,8 @@ exports.topUp = async (req, res) => {
       // 2. Ghi một dòng vào sổ lịch sử
       await trx('Transactions').insert({
         user_id,
-        amount: amount, // Số dương là Nạp tiền
-        type: 'TopUp',
+        amount: amount, 
+        type: 'TOPUP', // Đã chuyển thành IN HOA cho khớp với Mobile
         description: `Nạp ${amount.toLocaleString('vi-VN')}đ vào ví SmartPay`
       });
 
@@ -40,12 +43,14 @@ exports.topUp = async (req, res) => {
   }
 };
 
-// 2. API THANH TOÁN (TRỪ TIỀN)
+// 2. API THANH TOÁN (TRỪ TIỀN BẰNG VÍ)
 exports.pay = async (req, res) => {
-  const { user_id, amount, description } = req.body;
+  // 👇 ĐÃ SỬA: Lấy ID từ Token
+  const user_id = req.user.userId; 
+  const { amount, description } = req.body;
 
-  if (!user_id || !amount || amount <= 0) {
-    return res.status(400).json({ message: 'Số tiền hoặc thông tin không hợp lệ!' });
+  if (!amount || amount <= 0) {
+    return res.status(400).json({ message: 'Số tiền không hợp lệ!' });
   }
 
   try {
@@ -61,12 +66,12 @@ exports.pay = async (req, res) => {
         .decrement('wallet_balance', amount)
         .returning('wallet_balance');
 
-      // 3. Ghi sổ lịch sử (Số âm)
+      // 3. Ghi sổ lịch sử 
       await trx('Transactions').insert({
         user_id,
-        amount: -amount, // Số âm là Bị trừ tiền
-        type: 'Payment',
-        description: description || `Thanh toán phí dịch vụ ${amount.toLocaleString('vi-VN')}đ`
+        amount: amount, // (Sửa lại số dương, App tự hiểu dựa vào chữ PAYMENT)
+        type: 'PAYMENT', // Đã chuyển thành IN HOA
+        description: description || `Thanh toán dịch vụ ${amount.toLocaleString('vi-VN')}đ`
       });
 
       res.status(200).json({

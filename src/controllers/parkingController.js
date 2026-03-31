@@ -2,43 +2,73 @@ const db = require('../db');
 
 // API CHECK-IN DÀNH CHO AI CAMERA (Tự động phân ô đỗ)
 exports.checkIn = async (req, res) => {
-  const { license_plate, vehicle_type } = req.body;
+  const { license_plate } = req.body;
 
   try {
-    // 1. Kiểm tra xem xe này có đang ở trong bãi rồi không (chống quét đúp)
-    const existing = await db('Parking_Sessions')
+    // 1. Kiểm tra chống quét đúp (Xe đang ở trong bãi rồi)
+    const activeSession = await db('Parking_Sessions')
       .where({ license_plate, status: 'Active' })
       .first();
     
-    if (existing) {
+    if (activeSession) {
       return res.status(400).json({ message: 'Xe này đang ở trong bãi rồi!', open_barrier: false });
     }
 
-    // 2. TÌM MỘT Ô TRỐNG BẤT KỲ ĐỂ PHÂN BỔ (Tự động lấy 1 ô Available)
+    // ==========================================
+    // 🌟 LUỒNG 1: DÀNH CHO KHÁCH ĐÃ ĐẶT CHỖ QUA APP
+    // ==========================================
+    const bookedSession = await db('Parking_Sessions')
+      .where({ license_plate, status: 'Booked' })
+      .first();
+
+    if (bookedSession) {
+      // Nếu có đặt chỗ -> CẬP NHẬT GIỜ VÀO VÀ ĐỔI TRẠNG THÁI
+      await db('Parking_Sessions')
+        .where({ session_id: bookedSession.session_id })
+        .update({
+          check_in_time: db.fn.now(), // Dập thẻ thời gian ngay lúc này!
+          status: 'Active'
+        });
+
+      // Đổi trạng thái ô đỗ thành Đang sử dụng
+      await db('Parking_Slots')
+        .where({ slot_id: bookedSession.slot_id })
+        .update({ status: 'Occupied' });
+
+      return res.status(200).json({ 
+        message: `Khách VIP Đặt chỗ! Mời vào ô ${bookedSession.slot_id}`, 
+        open_barrier: true,
+        slot_assigned: bookedSession.slot_id
+      });
+    }
+
+    // ==========================================
+    // 🌟 LUỒNG 2: DÀNH CHO KHÁCH VÃNG LAI (KHÔNG ĐẶT CHỖ)
+    // ==========================================
     const availableSlot = await db('Parking_Slots')
       .where({ status: 'Available' })
       .orderBy('slot_id', 'asc') // Ưu tiên xếp từ A1 trở đi
       .first();
 
-    // Nếu bãi xe hết chỗ
     if (!availableSlot) {
       return res.status(400).json({ message: 'BÃI XE ĐÃ ĐẦY!', open_barrier: false });
     }
 
-    // 3. Xí chỗ: Chuyển trạng thái ô đó thành Đang sử dụng (Occupied)
+    // Xí chỗ ô đỗ
     await db('Parking_Slots')
       .where({ slot_id: availableSlot.slot_id })
       .update({ status: 'Occupied' });
 
-    // 4. Mở cửa cho xe vào và gắn thẳng vào ô đỗ vừa tìm được
+    // Tạo phiên đỗ xe mới tinh
     await db('Parking_Sessions').insert({
-      license_plate,
+      license_plate: license_plate,
       slot_id: availableSlot.slot_id,
+      check_in_time: db.fn.now(), // Dập thẻ thời gian cho xe vãng lai
       status: 'Active'
     });
 
     res.status(200).json({ 
-      message: `Nhận diện Vãng lai thành công. Đã xếp vào ô ${availableSlot.slot_id}`, 
+      message: `Khách Vãng lai. Đã phân vào ô ${availableSlot.slot_id}`, 
       open_barrier: true,
       slot_assigned: availableSlot.slot_id
     });
@@ -67,44 +97,77 @@ exports.getSlots = async (req, res) => {
 
 exports.bookSlot = async (req, res) => {
   try {
-    const { slot_id, license_plate } = req.body;
-    const user_id = req.user.userId; // Lấy ID người dùng từ Token bảo vệ
+    // 1. Nhận thêm expected_arrival_time từ Mobile (nếu có)
+    const { slot_id, license_plate, expected_arrival_time } = req.body;
+    const user_id = req.user.userId; 
 
-    // 1. Kiểm tra xem ô đỗ có tồn tại và đang "Trống" (Available) không
+    // 2. TÍNH TOÁN GIỜ KHÁCH ĐẾN
+    const arrivalTime = expected_arrival_time ? new Date(expected_arrival_time) : new Date();
+    const now = new Date();
+
+    // 3. BẢO VỆ NGHIỆP VỤ: Không đặt giờ quá khứ và Không đặt trước quá 2 tiếng
+    if (arrivalTime < now) {
+      return res.status(400).json({ message: 'Thời gian đặt chỗ không hợp lệ (nhỏ hơn giờ hiện tại)!' });
+    }
+    const maxAdvanceTime = 24 * 60 * 60 * 1000; // 24 tiếng
+    if (arrivalTime.getTime() - now.getTime() > maxAdvanceTime) {
+      return res.status(400).json({ message: 'Hệ thống chỉ hỗ trợ giữ chỗ trước tối đa 24 tiếng để tránh lãng phí ô đỗ!' });
+    }
+
+    // 4. CHỐT CHẶN CHỐNG GIAN LẬN (Đã được dời về đúng vị trí)
+    const activeOrBooked = await db('Parking_Sessions')
+      .where({ license_plate })
+      .whereIn('status', ['Active', 'Booked'])
+      .first();
+      
+    if (activeOrBooked) {
+      return res.status(400).json({ message: 'Biển số này hiện đang đỗ trong bãi hoặc đã được đặt chỗ trước đó!' });
+    }
+
+    // 5. KIỂM TRA Ô ĐỖ
     const slot = await db('Parking_Slots').where({ slot_id }).first();
     if (!slot || slot.status !== 'Available') {
       return res.status(400).json({ message: 'Rất tiếc! Ô đỗ này không hợp lệ hoặc đã có người đặt.' });
     }
 
-    // 2. Kiểm tra số dư ví xem có đủ 10.000 VNĐ để cọc không
+    // 6. KIỂM TRA VÍ TIỀN & XÁC ĐỊNH PHÍ ĐẶT CHỖ
     const user = await db('Users').where({ user_id }).first();
-    if (user.wallet_balance < 10000) {
-      return res.status(400).json({ 
-        message: 'Số dư ví không đủ 10.000 VNĐ để đặt cọc. Vui lòng nạp thêm tiền!' 
-      });
+    
+    // Tự động quyết định giá: VIP thì 0đ, Thường thì 10.000đ
+    const bookingFee = (user.role === 'VIP') ? 0 : 10000;
+
+    // Chỉ chặn lỗi nếu phí lớn hơn 0 mà ví lại không đủ tiền
+    if (bookingFee > 0 && user.wallet_balance < bookingFee) {
+      return res.status(400).json({ message: `Số dư ví không đủ ${bookingFee.toLocaleString('vi-VN')} VNĐ để đặt cọc. Vui lòng nạp thêm tiền!` });
     }
 
-    // 3. Bắt đầu Transaction (Đảm bảo 3 hành động dưới đây phải thành công cùng lúc)
+    // 7. LƯU VÀO DATABASE (Có Transaction)
     await db.transaction(async (trx) => {
-      // 3.1 Trừ 10.000 VNĐ trong ví
-      await trx('Users').where({ user_id }).decrement('wallet_balance', 10000);
-
-      // 3.2 Đổi trạng thái ô đỗ thành "Đang đặt" (Reserved)
+      // Trừ tiền theo biến bookingFee (0đ hoặc 10.000đ)
+      await trx('Users').where({ user_id }).decrement('wallet_balance', bookingFee);
+      
       await trx('Parking_Slots').where({ slot_id }).update({ status: 'Reserved' });
 
-      // 3.3 Tạo vé đỗ xe mới với trạng thái "Booked"
       await trx('Parking_Sessions').insert({
         license_plate: license_plate,
         slot_id: slot_id,
         user_id: user_id,
-        booking_time: new Date(),
+        booking_time: arrivalTime, 
         status: 'Booked'
+      });
+
+      // Lưu lịch sử giao dịch chính xác số tiền vừa trừ
+      await trx('Transactions').insert({
+        user_id: user_id,
+        amount: bookingFee,
+        type: 'Deduction',
+        description: `Trừ tiền cọc đặt trước ô đỗ ${slot_id}`,
+        created_at: new Date()
       });
     });
 
-    // 4. Trả kết quả thành công
     res.status(200).json({
-      message: 'Đặt chỗ thành công! Đã tạm trừ 10.000 VNĐ tiền cọc.',
+      message: `Đặt chỗ thành công! Vui lòng có mặt tại bãi trước ${new Date(arrivalTime.getTime() + 30*60000).toLocaleTimeString('vi-VN')}.`,
       booked_slot: slot_id
     });
 
@@ -229,6 +292,7 @@ exports.getAllSessions = async (req, res) => {
 };
 
 // API DÀNH CHO ADMIN: GIẢI PHÓNG Ô ĐỖ BẰNG TAY
+// API DÀNH CHO ADMIN: GIẢI PHÓNG Ô ĐỖ BẰNG TAY
 exports.clearSlot = async (req, res) => {
   const { slot_id } = req.body;
 
@@ -236,48 +300,66 @@ exports.clearSlot = async (req, res) => {
     // 1. Chuyển ô đỗ về màu xanh (Trống)
     await db('Parking_Slots').where({ slot_id }).update({ status: 'Available' });
 
-    // 2. Tìm xe nào đang đậu/đặt chỗ ở ô này và đánh dấu là đã hoàn thành (Ra khỏi bãi)
+    // 2. Ép xe Đang đỗ (Active) ra khỏi bãi
     await db('Parking_Sessions')
       .where({ slot_id, status: 'Active' })
-      .update({ 
-        status: 'Completed', 
-        check_out_time: db.fn.now() // Ghi nhận giờ ra
-      });
+      .update({ status: 'Completed', check_out_time: db.fn.now() });
+
+    // 3. Ép xe Đang đặt (Booked) thành trạng thái Hủy
+    await db('Parking_Sessions')
+      .where({ slot_id, status: 'Booked' })
+      .update({ status: 'Cancelled' });
 
     res.status(200).json({ message: `Đã giải phóng thành công ô ${slot_id}` });
   } catch (error) {
-    console.error("Lỗi giải phóng ô:", error);
-    res.status(500).json({ message: 'Lỗi hệ thống' });
+    console.error("Lỗi khi giải phóng ô đỗ:", error);
+    res.status(500).json({ message: 'Lỗi server khi giải phóng ô đỗ' });
   }
 };
 
+// ==========================================
 // API DÀNH CHO ADMIN: ÉP XE RA KHỎI BÃI TỪ BẢNG NHẬT KÝ
+// ==========================================
 exports.manualCheckout = async (req, res) => {
   const { session_id } = req.body;
   try {
-    // 1. Tìm xem chiếc xe này đang nằm ở ô nào
     const session = await db('Parking_Sessions').where({ session_id }).first();
-    
     if (!session) {
       return res.status(404).json({ message: 'Không tìm thấy dữ liệu xe' });
     }
 
-    // 2. Chốt sổ nhật ký (Cập nhật giờ ra và trạng thái)
+    // 🌟 BƯỚC 1: KIỂM TRA ĐẶC QUYỀN VIP BẰNG BIỂN SỐ 🌟
+    const userWithPlate = await db('Users').where({ license_plate: session.license_plate }).first();
+    const isVIP = userWithPlate && userWithPlate.role === 'VIP';
+
+    // 🌟 BƯỚC 2: TÍNH GIỜ ĐỖ THỰC TẾ 🌟
+    const checkInTime = new Date(session.check_in_time);
+    const checkOutTime = new Date();
+    let diffHours = Math.ceil((checkOutTime - checkInTime) / (1000 * 60 * 60));
+    if (diffHours === 0) diffHours = 1;
+
+    // 🌟 BƯỚC 3: TÍNH TIỀN (VIP = 0đ) 🌟
+    let finalFee = 0;
+    if (!isVIP) {
+      const systemSettings = await db('Settings').first(); 
+      const pricePerHour = (systemSettings && systemSettings.car_hour_price > 0) ? systemSettings.car_hour_price : 10000;
+      finalFee = diffHours * pricePerHour;
+    }
+
+    // Chốt sổ nhật ký (Cập nhật giờ ra, trạng thái VÀ LƯU DOANH THU THỰC)
     await db('Parking_Sessions')
       .where({ session_id })
       .update({ 
         status: 'Completed', 
-        check_out_time: db.fn.now() 
+        check_out_time: checkOutTime,
+        total_fee: finalFee 
       });
 
-    // 3. ĐIỂM QUAN TRỌNG NHẤT: Trả lại màu xanh cho ô đỗ của xe đó
     if (session.slot_id) {
-      await db('Parking_Slots')
-        .where({ slot_id: session.slot_id })
-        .update({ status: 'Available' });
+      await db('Parking_Slots').where({ slot_id: session.slot_id }).update({ status: 'Available' });
     }
 
-    res.status(200).json({ message: 'Đã cho xe ra khỏi bãi và giải phóng ô đỗ!' });
+    res.status(200).json({ message: isVIP ? 'Khách VIP xuất bãi miễn phí!' : `Đã cho xe ra! Thu: ${finalFee.toLocaleString()} VNĐ` });
   } catch (error) {
     console.error("Lỗi xuất bãi:", error);
     res.status(500).json({ message: 'Lỗi hệ thống' });
@@ -285,60 +367,167 @@ exports.manualCheckout = async (req, res) => {
 };
 
 // ==========================================
-// API CHECK-OUT (TÍNH TIỀN THỰC TẾ TỪ DATABASE)
+// API CHECK-OUT (AI CAMERA QUÉT CỔNG RA)
 // ==========================================
 exports.checkOut = async (req, res) => {
   const { license_plate } = req.body;
 
   try {
-    // 1. Tìm xe đang ở trong bãi
-    const session = await db('Parking_Sessions')
-      .where({ license_plate, status: 'Active' })
-      .first();
-
+    const session = await db('Parking_Sessions').where({ license_plate, status: 'Active' }).first();
     if (!session) {
       return res.status(404).json({ message: 'Không tìm thấy xe trong bãi!', open_barrier: false });
     }
 
-    // 2. TÍNH TIỀN "REAL" 100% TỪ DATABASE CÀI ĐẶT
-    const systemSettings = await db('Settings').first(); 
-    const pricePerHour = systemSettings ? systemSettings.car_hour_price : 10000; 
+    // 🌟 BƯỚC 1: KIỂM TRA ĐẶC QUYỀN VIP 🌟
+    const userWithPlate = await db('Users').where({ license_plate }).first();
+    const isVIP = userWithPlate && userWithPlate.role === 'VIP';
 
+    // 🌟 BƯỚC 2: TÍNH GIỜ ĐỖ 🌟
     const checkInTime = new Date(session.check_in_time);
     const checkOutTime = new Date();
-    const diffMs = checkOutTime - checkInTime; 
-    
-    // Hàm Math.ceil sẽ tự động làm tròn lên (lố 1 phút cũng tính là 1 giờ)
-    let diffHours = Math.ceil(diffMs / (1000 * 60 * 60)); 
+    let diffHours = Math.ceil((checkOutTime - checkInTime) / (1000 * 60 * 60));
     if (diffHours === 0) diffHours = 1; 
 
-    const fee = diffHours * pricePerHour; // Nhân với giá tiền lấy từ Cài đặt
+    // 🌟 BƯỚC 3: TÍNH TIỀN (VIP = 0đ) 🌟
+    let finalFee = 0;
+    if (!isVIP) {
+      const systemSettings = await db('Settings').first(); 
+      const pricePerHour = (systemSettings && systemSettings.car_hour_price > 0) ? systemSettings.car_hour_price : 10000; 
+      finalFee = diffHours * pricePerHour;
+    }
 
-    // 3. Cập nhật Nhật ký: Ghi giờ ra và Tiền
+    // Cập nhật Nhật ký
     await db('Parking_Sessions')
       .where({ session_id: session.session_id })
       .update({ 
         status: 'Completed', 
         check_out_time: checkOutTime,
-        total_fee: fee
+        total_fee: finalFee
       });
 
-    // 4. Trả lại màu Xanh cho Ô đỗ
     if (session.slot_id) {
-      await db('Parking_Slots')
-        .where({ slot_id: session.slot_id })
-        .update({ status: 'Available' });
+      await db('Parking_Slots').where({ slot_id: session.slot_id }).update({ status: 'Available' });
     }
 
     res.status(200).json({ 
-      message: `Xe ra thành công! Thu phí: ${fee} VNĐ`, 
+      message: isVIP ? `Xin chào KHÁCH VIP! Chúc thượng lộ bình an!` : `Xe ra thành công! Thu phí: ${finalFee.toLocaleString()} VNĐ`, 
       open_barrier: true,
-      fee: fee,
-      hours: diffHours
+      fee: finalFee,
+      hours: diffHours,
+      is_vip: isVIP
     });
 
   } catch (error) {
     console.error("Lỗi khi AI Check-out:", error);
     res.status(500).json({ message: 'Lỗi hệ thống' });
+  }
+};
+
+// Ép hủy đặt chỗ (Dành cho Admin/Web khi khách không đến - KHÔNG HOÀN TIỀN)
+exports.adminCancelBooking = async (req, res) => {
+  const { session_id, slot_id } = req.body;
+
+  try {
+    // 1. Chuyển trạng thái xe thành "Cancelled" (Giữ lại lịch sử)
+    await db('Parking_Sessions')
+      .where({ session_id: session_id })
+      .update({ status: 'Cancelled' });
+
+    // 2. Trả lại ô đỗ đó về trạng thái Trống
+    if (slot_id) {
+      await db('Parking_Slots')
+        .where({ slot_id: slot_id })
+        .update({ status: 'Available' });
+    }
+
+    res.status(200).json({ message: 'Đã hủy booking (Khách mất cọc) và giải phóng ô đỗ!' });
+  } catch (error) {
+    console.error("Lỗi khi hủy đặt chỗ:", error);
+    res.status(500).json({ message: 'Lỗi hệ thống khi hủy đặt chỗ.' });
+  }
+};
+
+// Bộ nhớ tạm để lưu dữ liệu Camera gửi lên (Chưa lưu vào Database)
+let pendingScans = { 'VÀO': null, 'RA': null };
+
+// 1. AI GỌI HÀM NÀY ĐỂ GỬI ẢNH LÊN
+exports.receivePendingScan = (req, res) => {
+  const { license_plate, gate, image } = req.body;
+  
+  if (!gate) return res.status(400).json({ message: "Thiếu cổng VÀO/RA" });
+
+  // Lưu đè hình ảnh mới nhất vào bộ nhớ tạm
+  pendingScans[gate] = {
+    license_plate,
+    gate,
+    image,
+    timestamp: Date.now()
+  };
+
+  res.status(200).json({ message: "Đã nhận dữ liệu chờ duyệt!" });
+};
+
+// 2. WEB DASHBOARD SẼ LIÊN TỤC GỌI HÀM NÀY ĐỂ HỎI XEM CÓ XE NÀO TỚI KHÔNG
+exports.getPendingScans = (req, res) => {
+  res.status(200).json(pendingScans);
+};
+
+// 3. SAU KHI BẢO VỆ DUYỆT XONG, GỌI HÀM NÀY ĐỂ XÓA POPUP
+exports.clearPendingScan = (req, res) => {
+  const { gate } = req.body;
+  if (gate) pendingScans[gate] = null;
+  res.status(200).json({ message: "Đã xóa trạng thái chờ" });
+};
+
+// ==========================================
+// API TRẢ VỀ THẺ "ĐANG GIỮ CHỖ / ĐANG ĐỖ" CHO MOBILE
+// ==========================================
+exports.getActiveBooking = async (req, res) => {
+  try {
+    const user_id = req.user.userId; // Lấy ID từ Token đăng nhập
+
+    // 1. Tìm phiên đỗ xe gần nhất đang ở trạng thái Booked (Giữ chỗ) hoặc Active (Đang đỗ)
+    const activeSession = await db('Parking_Sessions')
+      .where({ user_id: user_id })
+      .whereIn('status', ['Booked', 'Active'])
+      .orderBy('check_in_time', 'desc') // Sắp xếp mới nhất
+      .first();
+
+    // 2. NẾU KHÔNG TÌM THẤY (Bãi trống, không đặt chỗ)
+    if (!activeSession) {
+      return res.status(200).json({ has_active: false });
+    }
+
+    // 3. NẾU TÌM THẤY -> Chuẩn bị dữ liệu JSON đúng format Mobile yêu cầu
+    
+    // Hàm format giờ giấc thành HH:MM (VD: 15:00)
+    const formatTime = (dateString) => {
+      if (!dateString) return '--:--';
+      const d = new Date(dateString);
+      return d.toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' });
+    };
+
+    // Xác định giờ bắt đầu: Nếu đặt chỗ thì lấy booking_time, nếu vãng lai thì lấy check_in_time
+    const startTimeDate = activeSession.booking_time || activeSession.check_in_time;
+    
+    // Tính toán giờ kết thúc (Dự kiến cộng thêm 2 tiếng thời gian giữ chỗ tối đa)
+    const endTimeDate = new Date(new Date(startTimeDate).getTime() + 2 * 60 * 60 * 1000);
+
+    // Trả về JSON cho Mobile
+    res.status(200).json({
+      has_active: true,
+      data: {
+        session_id: activeSession.session_id, // Gửi thêm cái này lỡ Mobile cần dùng gọi API Hủy đặt chỗ
+        slot_id: activeSession.slot_id,
+        license_plate: activeSession.license_plate,
+        start_time: formatTime(startTimeDate),
+        end_time: formatTime(endTimeDate),
+        real_status: activeSession.status // 'Booked' hoặc 'Active' để Mobile đổi màu thẻ nếu muốn
+      }
+    });
+
+  } catch (error) {
+    console.error("Lỗi lấy Active Booking:", error);
+    res.status(500).json({ message: 'Lỗi server khi lấy dữ liệu thẻ giữ chỗ.' });
   }
 };

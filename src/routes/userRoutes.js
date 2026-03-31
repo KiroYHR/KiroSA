@@ -12,9 +12,13 @@ router.post('/topup', authMiddleware, userController.topUpWallet);
 router.get('/all', userController.getAllUsers);
 
 // Cập nhật thông tin cá nhân
-router.put('/profile/update', authMiddleware, userController.updateProfile);
+router.put('/profile', authMiddleware, userController.updateProfile);
 
 // Đổi mật khẩu
 router.put('/change-password', authMiddleware, userController.changePassword);
+
+router.get('/transactions', authMiddleware, userController.getTransactions);
+
+router.put('/password', authMiddleware, userController.changePassword);
 
 module.exports = router;
