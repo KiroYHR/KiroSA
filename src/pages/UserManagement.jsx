@@ -13,14 +13,23 @@ const STATUS_MAP = {
 export default function UserManagement() {
   const [search, setSearch]   = useState('');
   const [status, setStatus]   = useState('all');
-  const [memberType, setMemberType] = useState('all'); // State lọc VIP/Thường
+  const [memberType, setMemberType] = useState('all'); 
   
   const [users, setUsers]     = useState([]);
   const [loading, setLoading] = useState(true);
-  const [roleTab, setRoleTab] = useState('Customer'); // 'Customer' (Guest/VIP) hoặc 'Admin'
+
+  // 👇 ĐÃ THÊM THẺ NHỚ LOCALSTORAGE ĐỂ F5 KHÔNG BỊ MẤT TAB 👇
+  const [roleTab, setRoleTab] = useState(() => {
+    return localStorage.getItem('userRoleTab') || 'Customer';
+  });
+
+  const handleTabSwitch = (tabName) => {
+    setRoleTab(tabName);
+    localStorage.setItem('userRoleTab', tabName); // Lưu vào bộ nhớ trình duyệt
+  };
+  // 👆 ---------------------------------------------------- 👆
 
   useEffect(() => {
-    // Nhớ dùng link Ngrok hoặc biến môi trường ở đây nếu cần
     fetch('http://localhost:5000/api/users/all')
       .then(res => res.json())
       .then(result => {
@@ -31,7 +40,7 @@ export default function UserManagement() {
             phone: u.phone_number,
             plate: u.license_plate || 'Chưa cập nhật',
             type: u.vehicle_type || 'Chưa rõ',
-            role: u.role || 'Guest', // Có thể là Admin, VIP, hoặc Guest
+            role: u.role || 'Guest', 
             registered: new Date(u.created_at).toLocaleDateString('vi-VN'),
             status: 'active'
           }));
@@ -46,20 +55,22 @@ export default function UserManagement() {
   }, []);
 
   const filtered = users.filter(u => {
-    // 1. Phân loại Tab chính
+    // 1. Phân loại chuẩn theo Tab
     const isCustomerTab = roleTab === 'Customer' && (u.role === 'Guest' || u.role === 'VIP');
     const isAdminTab = roleTab === 'Admin' && u.role === 'Admin';
+    
+    // Nếu không thuộc Tab đang mở thì loại luôn
     if (!isCustomerTab && !isAdminTab) return false;
 
-    // 2. Lọc theo tìm kiếm
+    // 2. Các logic search và filter khác
     const matchSearch = !search || u.name.toLowerCase().includes(search.toLowerCase())
       || u.plate.toLowerCase().includes(search.toLowerCase())
       || u.phone.includes(search);
     
-    // 3. Lọc trạng thái & Hạng thành viên (chỉ áp dụng cho Tab Khách hàng)
     const matchStatus = status === 'all' || u.status === status;
     const matchMember = memberType === 'all' || u.role === memberType;
     
+    // Ở Tab Admin không có filter MemberType nên bỏ qua
     if (roleTab === 'Customer') return matchSearch && matchStatus && matchMember;
     return matchSearch && matchStatus;
   });
@@ -70,6 +81,7 @@ export default function UserManagement() {
 
   return (
     <div className="page-container">
+      {/* KHU VỰC HEADER (Bạn đã lỡ tay xóa mất phần này ở code cũ) */}
       <div className="page-header">
         <div>
           <h1 className="page-title">Quản lý tài khoản</h1>
@@ -81,10 +93,9 @@ export default function UserManagement() {
         </div>
       </div>
 
-      {/* TABS CHUYỂN ĐỔI */}
       <div style={{ display: 'flex', gap: '15px', marginBottom: '20px', borderBottom: '2px solid #1e293b' }}>
         <button 
-          onClick={() => setRoleTab('Customer')}
+          onClick={() => handleTabSwitch('Customer')}
           style={{ 
             background: 'none', border: 'none', color: roleTab === 'Customer' ? '#3b82f6' : '#94a3b8', 
             padding: '10px 20px', fontSize: '16px', fontWeight: 'bold', cursor: 'pointer',
@@ -93,7 +104,7 @@ export default function UserManagement() {
           <MdPeople style={{ verticalAlign: 'middle', marginRight: '5px' }} /> Khách Hàng & VIP
         </button>
         <button 
-          onClick={() => setRoleTab('Admin')}
+          onClick={() => handleTabSwitch('Admin')}
           style={{ 
             background: 'none', border: 'none', color: roleTab === 'Admin' ? '#3b82f6' : '#94a3b8', 
             padding: '10px 20px', fontSize: '16px', fontWeight: 'bold', cursor: 'pointer',
@@ -103,7 +114,6 @@ export default function UserManagement() {
         </button>
       </div>
 
-      {/* Filters */}
       <div className="card um-filter-bar" style={{ marginBottom: 20 }}>
         <div className="um-search-wrap">
           <MdSearch className="search-icon" />
@@ -116,7 +126,6 @@ export default function UserManagement() {
             <option value="blocked">Bị chặn</option>
           </select>
           
-          {/* Lọc Hạng thành viên */}
           {roleTab === 'Customer' && (
             <select className="form-select" value={memberType} onChange={e => setMemberType(e.target.value)}>
               <option value="all">Tất cả hạng</option>
@@ -128,7 +137,7 @@ export default function UserManagement() {
         <div className="um-count"><MdPeople /> {filtered.length} tài khoản</div>
       </div>
 
-      {/* Table */}
+      {/* KHU VỰC BẢNG DỮ LIỆU ĐÃ ĐƯỢC FIX LỖI XÔ LỆCH CỘT */}
       <div className="card" style={{ padding: 0 }}>
         <div className="table-wrapper">
           <table className="data-table">
@@ -165,9 +174,11 @@ export default function UserManagement() {
                       </td>
                       <td style={{ color: 'var(--text-secondary)' }}>{u.phone}</td>
                       
-                      {roleTab === 'Customer' && <td><strong style={{ color: 'var(--accent-blue-light)' }}>{u.plate}</strong></td>}
+                      {/* Đã tách riêng 2 cột ra để không bị xô lệch */}
+                      {roleTab === 'Customer' && (
+                        <td><strong style={{ color: 'var(--accent-blue-light)' }}>{u.plate}</strong></td>
+                      )}
                       
-                      {/* CỘT HUY HIỆU VIP */}
                       {roleTab === 'Customer' && (
                         <td>
                           {u.role === 'VIP' 
@@ -175,9 +186,14 @@ export default function UserManagement() {
                             : <span className="badge badge-muted">Khách thường</span>}
                         </td>
                       )}
-                      
+
                       <td style={{ color: 'var(--text-secondary)', fontSize: 12 }}>{u.registered}</td>
-                      <td><span className={`badge ${s.cls}`}>{s.label}</span></td>
+                      <td>
+                        {roleTab === 'Admin' 
+                          ? <span className="badge badge-danger" style={{ background: '#dc3545', color: '#fff' }}>Quản trị viên</span>
+                          : <span className={`badge ${s.cls}`}>{s.label}</span>
+                        }
+                      </td>
                       <td>
                         <div className="action-btns">
                           <button className="action-btn edit" title="Chỉnh sửa"><MdEdit /></button>
